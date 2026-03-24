@@ -1,0 +1,9 @@
+models:
+  - name: "mistral-675b"
+    path: "/mistral"
+
+  - name: "nemotron-120b"
+    path: "/nemotron"
+
+  - name: "gpt-oss-120b"
+    path: "/gpt-oss"
