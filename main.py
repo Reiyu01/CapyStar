@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import os
-from router import load_config,build_route_table,get_target,build_v1_models_list
+from core.router import load_config,build_route_table,get_target,build_v1_models_list
 
 app = FastAPI()
 
