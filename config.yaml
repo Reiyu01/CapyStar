@@ -1,9 +1,16 @@
 models:
   - name: "mistral-675b"
     path: "/mistral"
+    provider: "vllm"
 
-  - name: "nemotron-120b"
-    path: "/nemotron"
+  - name: "nemotron-3-super-120b"
+    path: "/nemotron-3-super-120b"
+    provider: "vllm"
 
   - name: "gpt-oss-120b"
-    path: "/gpt-oss"
+    path: "/gpt-oss-120b"
+    provider: "vllm"
+  
+  - name: "qwen2.5vl:72b"
+    path: "/qwen2.5vl-72b"
+    provider: "ollama"
