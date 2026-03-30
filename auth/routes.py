@@ -23,7 +23,7 @@ class GenerateRequest(BaseModel):
 #用post可以將請求放入body中確保資料不會直接顯示在網址上，而get會顯示網址上，因此更安全。
 #且post能夠根據body的輸入生成新資料
 @router.post("/generate-key")
-async def token_generator(body: GenerateRequest)
+async def token_generator(body: GenerateRequest):
     """
     產生 API Key 並存入DB
     呼叫方: 學校 Oauth完成後的前端
