@@ -1,12 +1,16 @@
-import httpx
-from fastapi import FastAPI,Request
+import os
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+from fastapi import FastAPI
+
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-import os
 from core.router import load_config,build_route_table,get_target,build_v1_models_list
 
-app = FastAPI()
+load_dotenv()
+AI_SERVER_IP = os.getenv("AI_SERVER_IP")
+
+app = FastAPI(title="AI Gateway",lifespan=lifespan)
 
 
 # --- 新增 CORS 設定 ---
@@ -21,8 +25,7 @@ app.add_middleware(
 
 
 
-load_dotenv()
-AI_SERVER_IP = os.getenv("AI_SERVER_IP")
+
 
 #建構可讀取python格式
 config = load_config("config.yaml")
