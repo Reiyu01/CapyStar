@@ -54,6 +54,8 @@ def decode_api_key( key : str) -> dict:
     這邊不直接讀DB，而是採用驗證格式簽名以及有效期限
     會回傳 {"student_id": xxx, "timestamp":}
     失敗拋出驗證失敗403
+
+    共計驗證: 1.判斷是否有三個":" 2.判斷學號格式 3.將decode出來的學號日期再與伺服器金鑰給_sign函式加密 再與 其傳入的sig進行比對
     """
     try:
         decoded = base64.urlsafe_b64decode(key.encode()).decode()

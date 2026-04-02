@@ -14,3 +14,9 @@ models:
   - name: "qwen2.5vl:72b"
     path: "/qwen2.5vl-72b"
     provider: "ollama"
+
+  - name: "qwen3-asr-1.7b"
+    path: "/qwen3-asr-1.7b"
+    provider: "vllm"
+
+    
