@@ -19,4 +19,6 @@ models:
     path: "/qwen3-asr-1.7b"
     provider: "vllm"
 
-    
+  - name: "fish-speech-server"
+    path: "/fish-speech-server"
+    provider: "vllm"

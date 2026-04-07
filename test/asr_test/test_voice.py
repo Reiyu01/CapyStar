@@ -1,58 +1,88 @@
+# -*- coding: utf-8 -*-
 import asyncio
-import websockets
-import aiofiles
 import json
-import time
-from dotenv import load_dotenv
-import os
-load_dotenv = os.getenv("test_key")
-# === 設定區 ===
-GATEWAY_URL = ""
-API_KEY = ""
-AUDIO_FILE = "test_voice.wav"  # 你的音檔路徑
-CHUNK_SIZE = 4000  # 每次傳送的大小 (約 125ms 的音訊)
+import librosa
+import numpy as np
+import pybase64 as base64
+import websockets
 
-async def send_audio(websocket):
-    """模擬麥克風，持續讀取檔案並發送"""
-    print(" [📤] 開始傳送音訊流...")
-    async with aiofiles.open(AUDIO_FILE, mode='rb') as f:
-        while True:
-            chunk = await f.read(CHUNK_SIZE)
-            if not chunk:
-                # 傳送結束信號 (視你的模型協議而定，有些是傳文字 {"type": "end"})
-                # await websocket.send(json.dumps({"event": "stop"})) 
-                break
-            
-            await websocket.send(chunk)
-            # 模擬真實說話速度，不要一次全部塞進去
-            await asyncio.sleep(0.1) 
-    print(" [📤] 檔案傳送完畢。")
+# 請確保此 URL 與你 Log 中運作正常的格式一致
+GATEWAY_URL = "wss://b225.54ucl.com/capystar/v1/realtime/qwen3-asr-1.7b"
+API_KEY = "QzExMzExODIxMjoxNzc0ODY3NDQ2OjQxMDI5MDIzYjU5MDBlYjMyMWUyYzY0MTM3Njc4OGVlOWQ1ZjQyZDFjNjE2MjFjN2FmNTUxNjczMTkzZDU0OTc="
+AUDIO_PATH = "test_voice_fixed.wav" 
+MODEL_NAME = "qwen3-asr-1.7b"
 
-async def receive_text(websocket):
-    """持續接收 A 機房回傳的辨識結果"""
-    print(" [📥] 等待辨識結果...")
-    try:
-        async for message in websocket:
-            # 假設後端回傳的是 JSON 字串
-            print(f" [✨ 辨識中]: {message}")
-    except websockets.exceptions.ConnectionClosed:
-        print(" [📥] 連線已由伺服器關閉。")
-
-async def main():
-    # 將 API Key 帶在 Query String 中
+async def debug_transcribe():
     uri = f"{GATEWAY_URL}?api_key={API_KEY}"
-    
+    print(f"🚀 連線中...")
+
     try:
-        async with websockets.connect(uri) as websocket:
-            print(f" ✅ 已連接至 Gateway: {GATEWAY_URL}")
+        async with websockets.connect(uri) as ws:
+            # 接收初始訊息
+            await ws.recv() 
+
+            # 1. 更新 Session
+            await ws.send(json.dumps({"type": "session.update", "model": MODEL_NAME}))
             
-            # 同時執行發送與接收
-            await asyncio.gather(
-                send_audio(websocket),
-                receive_text(websocket)
-            )
+            # 2. 轉換與傳送音訊
+            audio, _ = librosa.load(AUDIO_PATH, sr=16000, mono=True)
+            pcm16 = (audio * 32767).astype(np.int16)
+            audio_bytes = pcm16.tobytes()
+            
+            chunk_size = 4096
+            for i in range(0, len(audio_bytes), chunk_size):
+                chunk = audio_bytes[i : i + chunk_size]
+                await ws.send(json.dumps({
+                    "type": "input_audio_buffer.append",
+                    "audio": base64.b64encode(chunk).decode("utf-8"),
+                }))
+            
+            # 3. 觸發辨識
+            print("⏳ 音訊上傳完成，等待辨識結果...")
+            await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            await ws.send(json.dumps({
+                "type": "response.create",
+                "response": {
+                    "modalities": ["text"]
+                }
+            }))
+
+            # 4. 接收數據流並在內部去重
+            full_text_chunks = []
+            exclude_tokens = ["<asr_text>", "language", " English", "", None]
+            
+            while True:
+                try:
+                    raw_message = await ws.recv()
+                    data = json.loads(raw_message)
+                    
+                    # 處理文字片段
+                    if "delta" in data:
+                        text_chunk = data["delta"]
+                        if text_chunk not in exclude_tokens:
+                            # 去重邏輯：如果當前碎片與上一個相同則跳過 (處理 ASR 重複發送)
+                            if not full_text_chunks or full_text_chunks[-1] != text_chunk:
+                                full_text_chunks.append(text_chunk)
+                    
+                    # 判定結束訊號
+                    if data.get("type") in ["response.done", "transcription.done", "error"]:
+                        if data.get("type") == "error":
+                            print(f"❌ 伺服器錯誤: {data.get('error')}")
+                        break
+                        
+                except websockets.exceptions.ConnectionClosed:
+                    break
+
+            # 5. 一次性整理並輸出
+            # 去掉可能的重複字串拼湊 (如: "你好你好" -> "你好")
+            final_result = "".join(full_text_chunks).strip()
+            
+            # 輸出最終結果
+            print(f"\n✨ 辨識結果：{final_result}")
+            print("✅ 任務完成")
+
     except Exception as e:
-        print(f" ❌ 錯誤: {e}")
+        print(f"❌ 程式發生異常: {e}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(debug_transcribe())

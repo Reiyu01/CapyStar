@@ -1,6 +1,6 @@
 import httpx
 import websockets
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect,Response
 from fastapi.responses import StreamingResponse
 import asyncio
 from core.router import get_target
@@ -49,7 +49,8 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
 
         target_base = get_target(route_table, model_name)
-        target_ws_url = target_base.replace("http", "ws", 1)
+        target_base = target_base.replace("/v1/chat/completions", "")
+        target_ws_url = target_base.replace("http", "ws", 1) 
 
         await websocket.accept()
         
@@ -94,3 +95,47 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         finally:
             if websocket.client_state.name != "DISCONNECTED":
                 await websocket.close()
+
+    #fish speech tts路由邏輯
+    @app.post("/v1/tts")
+    async def tts(request: Request):
+        key = extract_key(request)
+        user = decode_api_key(key)
+        
+        body = await request.json()
+
+        
+        # 格式對應轉換：OpenAI -> Fish 原生
+        if "input" in body:
+            body["text"] = body.pop("input")
+        if "response_format" in body:
+            body["format"] = body.pop("response_format")
+
+        model_name = body.get("model", "") 
+
+        raw_target = get_target(route_table, model_name)
+        # 這裡建議先 print 出來確認 raw_target 是什麼
+        print(f"DEBUG: raw_target = {raw_target}")
+
+        target = raw_target.replace("/v1/chat/completions", "") # 先拔掉舊路徑
+        target = f"{target}/v1/tts" # 再補上新路徑，確保中間只有一個 
+        target = target.replace("//v1", "/v1")
+
+        print(f">>> 請求目標: {target}")
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            # 記得帶上 Header 轉發給後端
+            resp = await client.post(
+                target, 
+                json=body, 
+               #headers={"Authorization": f"Bearer {key}"} 
+            )
+
+            if resp.status_code != 200:
+                return Response(content=resp.text, status_code=resp.status_code, media_type="application/json")
+
+            return Response(
+                content=resp.content,
+                media_type=resp.headers.get("content-type", "audio/mpeg"),
+                headers={"Content-Disposition": "attachment; filename=speech.mp3"}
+            )
