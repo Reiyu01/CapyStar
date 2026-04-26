@@ -320,7 +320,6 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         voice_name      = body.get("voice") or ssml_voice or "taiwan_girl"
         speed           = body.get("speed", ssml_speed if ssml_speed is not None else 1.0)
-        seed            = body.get("seed", 42)
         response_format = body.get("response_format", "pcm")  # OpenAI 預設 mp3，pipecat 預設 pcm
 
         if response_format not in RESPONSE_FORMAT_MEDIA:
@@ -372,9 +371,15 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
             "format":      fish_fmt,
             "sample_rate": body.get("sample_rate", fmt_defaults.get("sample_rate")),
             "normalize":   True,
-            "latency":     "normal",
-            "speed":       speed,
-            "seed":        seed,
+            "latency":     body.get("latency", "normal"),
+            "prosody": {
+                "speed":  speed,
+                "volume": body.get("volume", 0),
+            },
+            "chunk_length":   body.get("chunk_length", 300),
+            "temperature":    body.get("temperature", 0.7),
+            "top_p":          body.get("top_p", 0.7),
+            "seed":           body.get("seed", 42),
         }
         # 僅在對應格式時加入 bitrate 參數
         if "mp3_bitrate" in fmt_defaults:
