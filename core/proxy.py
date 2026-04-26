@@ -3,7 +3,7 @@ import websockets
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect,Response,UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 import asyncio
-from core.router import get_target
+from core.router import get_target, get_model_info
 from auth.keygen import extract_key, decode_api_key
 import os
 import base64
@@ -54,10 +54,11 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         #         resp = await client.post(target,json=body)
         #         return resp.json()
             
-    #Websocket ASR路由邏輯
+    #Websocket ASR路由邏輯 — 相容 OpenAI realtime 格式
+    # OpenAI 標準: wss://.../v1/realtime?model=<model_name>
+    # 同時保留 path param 格式向下相容
     @app.websocket("/v1/realtime")
     @app.websocket("/v1/realtime/{model_name}")
-    @app.websocket("/v1/realtime/audio/transcriptions")
     # async def asr_websocket_proxy(websocket: WebSocket, model_name: str):
     #     # 1. 身份驗證 (從 Query Params 或 Headers 提取)
     #     api_key = websocket.query_params.get("api_key") or websocket.headers.get("Authorization")
@@ -128,7 +129,9 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
 
 
-    async def asr_websocket_proxy(websocket: WebSocket, model_name: str = "qwen3-asr-1.7b"):
+    async def asr_websocket_proxy(websocket: WebSocket, model_name: str = None):
+        # OpenAI 格式: ?model=<name>；舊格式: path param
+        model_name = model_name or websocket.query_params.get("model", "qwen3-asr-1.7b")
         #連線驗證
         api_key = websocket.query_params.get("api_key") or websocket.headers.get("Authorization")
 
@@ -138,12 +141,13 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
             user = decode_api_key(api_key)
             print(f">>> ASR 請求來自: {user['student_id']}")
         except Exception:
+            # 必須先 accept 再 close，否則 WebSocket 會報錯
+            await websocket.accept()
             await websocket.close(code=4003)
             return
 
-        target_base = get_target(route_table, model_name)
-        target_base = target_base.replace("/v1/chat/completions", "")
-        target_ws_url = target_base.replace("http", "ws", 1) 
+        info = get_model_info(route_table, model_name)
+        target_ws_url = info["base_url"].replace("http", "ws", 1) + "/v1/realtime"
 
         await websocket.accept()
         
@@ -197,11 +201,14 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
                         else:
                             await websocket.send_bytes(message)
 
-                #使用wait只要任一任務結束就斷線停止全部
+                #任一結束就全部停止
                 done, pending = await asyncio.wait(
-                    [forward_to_backend(), forward_to_client()],
+                    [
+                        asyncio.create_task(forward_to_backend()),
+                        asyncio.create_task(forward_to_client()),
+                    ],
                     return_when=asyncio.FIRST_COMPLETED,
-                    )
+                )
                 for task in pending:
                     task.cancel()
 
@@ -214,95 +221,86 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
                 await websocket.close()
 
 
-    @app.post("/v1/realtime/audio/transcriptions")
-    @app.post("/v1/audio/transcriptions") # 同時支援兩種路徑
+    # POST ASR — OpenAI 標準: POST /v1/audio/transcriptions (multipart/form-data)
+    @app.post("/v1/audio/transcriptions")
     async def asr_proxy(request: Request):
         key = extract_key(request)
-        
-        # 讀取 Form Data (包含檔案與文字欄位)
+        user = decode_api_key(key)
+        print(f">>> ASR 請求來自: {user['student_id']}")
+
         form = await request.form()
         model_name = form.get("model")
-        
-        # 獲取後端 Base URL
-        raw_target = target = get_target(route_table, model_name)
-        # target_base = raw_target.split("/v1")[0]
-        # target_url = f"{target_base}/{model_name}"
-#        if not target.endswith("/v1/audio/transcriptions"):
- #          target = f"{target.rstrip('/')}/v1/audio/transcriptions"
+        response_format = form.get("response_format", "json")
 
+        target = get_model_info(route_table, model_name)["url"]
+        print(f">>> ASR 轉發目標: {target}")
 
-#4/21
-        import urllib.parse
-        parsed = urllib.parse.urlparse(raw_target)
-        
-        # 重新拼接：協定 + 主機(含Port) + 標準 ASR 路徑
-        target = f"{parsed.scheme}://{parsed.netloc}/v1/audio/transcriptions"
-
-        print(f"DEBUG: Proxying to {target}") # 加上這行看輸出的網址對不對
-        
-        
-        
-        
-        # 準備轉發
         async with httpx.AsyncClient(timeout=60) as client:
             files = {}
             data = {}
-            
             for k, v in form.items():
                 if isinstance(v, UploadFile):
-                    # 重新讀取檔案內容
                     file_content = await v.read()
                     files[k] = (v.filename, file_content, v.content_type)
                 else:
                     data[k] = v
 
-            # 執行轉發
             resp = await client.post(target, files=files, data=data)
-            
-            # 直接回傳後端的內容與狀態碼
-            return Response(
-                content=resp.content, 
-                status_code=resp.status_code, 
-                media_type="application/json"
-            )
+
+            if resp.status_code != 200:
+                return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+
+            # 統一回傳 OpenAI 格式: {"text": "..."}
+            if response_format == "text":
+                return Response(content=resp.content, media_type="text/plain")
+            return Response(content=resp.content, status_code=200, media_type="application/json")
 
     @app.get("/v1/realtime/models")
     async def list_models():
         return {
             "object": "list",
             "data": [
-                {"id": "qwen3-asr-1.7b", "object": "model", "owned_by": "system"},
-
+                {"id": name, "object": "model", "owned_by": "system"}
+                for name, info in route_table.items()
+                if info["type"] == "asr"
             ]
         }
 
 
-    #ssml處理
-    def parse_ssml_to_fish_params(ssml_text):
-    # 1. 提取語速 (Prosody rate -> Speed)
-    # 假設 SSML 傳來 <prosody rate="1.5">，提取 1.5
-        speed = 1.0
-        rate_match = re.search(r'rate="([\d\.]+)"', ssml_text)
-        if rate_match:
-            speed = float(rate_match.group(1))
-
-        # 2. 提取音色名稱 (Voice name)
-        voice_name = "default"
+    # SSML 解析 (pipecat / Azure TTS 相容)
+    def parse_ssml_to_fish_params(ssml_text: str):
+        speed = float(re.search(r'rate="([\d\.]+)"', ssml_text).group(1)) \
+            if re.search(r'rate="([\d\.]+)"', ssml_text) else None
         voice_match = re.search(r'name="([^"]+)"', ssml_text)
-        if voice_match:
-            voice_name = voice_match.group(1)
-
-        # 3. 清洗出純文字 (真正要唸的內容)
+        voice_name = voice_match.group(1) if voice_match else None
         clean_text = re.sub(r'<[^>]*>', '', ssml_text).strip()
-
         return clean_text, voice_name, speed
 
+    # response_format -> (Content-Type, Fish Speech 格式名)
+    # Fish Speech 支援: wav/pcm, mp3, opus
+    RESPONSE_FORMAT_MEDIA: dict = {
+        "mp3":  "audio/mpeg",
+        "opus": "audio/opus",
+        "wav":  "audio/wav",
+        "pcm":  "audio/pcm",   # 由 wav 產生後剝 header
+    }
 
-
+    # Fish Speech 各格式預設參數
+    # wav/pcm: sample_rate 可選 8000/16000/24000/32000/44100，預設 44100
+    # mp3:     sample_rate 可選 32000/44100，bitrate 64/128(預設)/192 kbps
+    # opus:    sample_rate 固定 48000，bitrate -1000(auto)/24000/32000(預設)/48000/64000
+    FORMAT_DEFAULTS: dict = {
+        "wav":  {"sample_rate": 44100},
+        "pcm":  {"sample_rate": 44100},
+        "mp3":  {"sample_rate": 44100, "mp3_bitrate": 128},
+        "opus": {"sample_rate": 48000, "opus_bitrate": 32000},
+    }
 
     VOICE_DIR = "./voices"
-    #於voices下放入對應wav檔以及txt以便讀取
-    #fish speech tts路由邏輯
+
+    # TTS — OpenAI 標準: POST /v1/audio/speech
+    # 同時保留 Fish Speech 原生路徑 /v1/tts
+    # Request body: {model, input, voice, response_format?, speed?}
     @app.post("/v1/tts")
     @app.post("/v1/audio/speech")
     async def tts(request: Request):
@@ -311,195 +309,103 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         body = await request.json()
 
-        # 1. 解析輸入
-        raw_input = body.get("text", body.get("input", ""))
-        clean_text, voice_name, speed = parse_ssml_to_fish_params(raw_input)
-        
-        # 2. 定義 seed (解決 NameError)
-        # 優先取用請求中的 seed，若無則設為 42 保持聲音一致
-        seed = body.get("seed", 42)
+        # OpenAI 標準欄位: "input"；SSML / 舊版相容: "text"
+        raw_input = body.get("input") or body.get("text", "")
+
+        # 若輸入為 SSML，解析出文字/音色/語速；否則直接讀欄位
+        if raw_input.lstrip().startswith("<"):
+            clean_text, ssml_voice, ssml_speed = parse_ssml_to_fish_params(raw_input)
+        else:
+            clean_text, ssml_voice, ssml_speed = raw_input, None, None
+
+        voice_name      = body.get("voice") or ssml_voice or "taiwan_girl"
+        speed           = body.get("speed", ssml_speed if ssml_speed is not None else 1.0)
+        seed            = body.get("seed", 42)
+        response_format = body.get("response_format", "pcm")  # OpenAI 預設 mp3，pipecat 預設 pcm
+
+        if response_format not in RESPONSE_FORMAT_MEDIA:
+            return Response(
+                content=f'{{"error": "不支援的格式 {response_format}，可選: {", ".join(RESPONSE_FORMAT_MEDIA)}"}}'.encode(),
+                status_code=400,
+                media_type="application/json",
+            )
 
         if not clean_text:
             clean_text = raw_input
 
-        # 3. 讀取對應音檔 (加入保底邏輯)
-        voice_path = os.path.join(VOICE_DIR, f"{voice_name}.wav")
-        if not os.path.exists(voice_path):
-            voice_path = os.path.join(VOICE_DIR, f"{voice_name}.mp3")
+        # 找音色檔 (wav 優先 > mp3)，找不到 fallback
+        def find_voice(name: str):
+            for ext in ("wav", "mp3"):
+                p = os.path.join(VOICE_DIR, f"{name}.{ext}")
+                if os.path.exists(p):
+                    return p
+            return None
 
-        # --- 保底檢查 ---
-        if not os.path.exists(voice_path):
-            fallback_name = "taiwan_girl" # 請確保你的 voices 資料夾裡有 kobe.wav
-            print(f"警告: 找不到音色 {voice_name}，自動切換至保底音色 {fallback_name}")
-            voice_name = fallback_name
-            voice_path = os.path.join(VOICE_DIR, f"{voice_name}.wav")
-            if not os.path.exists(voice_path):
-                voice_path = os.path.join(VOICE_DIR, f"{voice_name}.mp3")
+        voice_path = find_voice(voice_name)
+        if not voice_path:
+            fallback = "taiwan_girl"
+            print(f"警告: 找不到音色 {voice_name}，切換至 {fallback}")
+            voice_name = fallback
+            voice_path = find_voice(voice_name)
 
         text_path = os.path.join(VOICE_DIR, f"{voice_name}.txt")
 
-        # 讀取音檔並轉為 Base64
         references = []
-        if os.path.exists(voice_path):
+        if voice_path:
             with open(voice_path, "rb") as f:
-                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
-
+                audio_base64 = base64.b64encode(f.read()).decode("utf-8")
             ref_text = ""
             if os.path.exists(text_path):
                 with open(text_path, "r", encoding="utf-8") as f:
                     ref_text = f.read().strip()
-
-            references = [{
-                "audio": audio_base64,
-                "text": ref_text
-            }]
+            references = [{"audio": audio_base64, "text": ref_text}]
         else:
-            # 極端情況：連保底音色都找不到
             print(f"嚴重錯誤: 在 {VOICE_DIR} 中找不到任何音色檔。")
 
-        # 4. 組裝給 Fish Speech 的 payload
+        # Fish Speech 不接受 "pcm" 格式名稱，用 wav 產生後自行剝 header
+        fish_fmt = "wav" if response_format == "pcm" else response_format
+        fmt_defaults = FORMAT_DEFAULTS.get(fish_fmt, {})
+
         payload = {
-            "text": clean_text,
-            "references": references,
-            "format": "wav",
-#這邊可選mp3 or wav
-            "sample_rate": 24000,
-            # "format": body.get("response_format", body.get("format", "mp3")),
-            "normalize": True,
-            "latency": "normal",
-            "speed": speed,
-            "seed": seed
+            "text":        clean_text,
+            "references":  references,
+            "format":      fish_fmt,
+            "sample_rate": body.get("sample_rate", fmt_defaults.get("sample_rate")),
+            "normalize":   True,
+            "latency":     "normal",
+            "speed":       speed,
+            "seed":        seed,
         }
+        # 僅在對應格式時加入 bitrate 參數
+        if "mp3_bitrate" in fmt_defaults:
+            payload["mp3_bitrate"] = body.get("mp3_bitrate", fmt_defaults["mp3_bitrate"])
+        if "opus_bitrate" in fmt_defaults:
+            payload["opus_bitrate"] = body.get("opus_bitrate", fmt_defaults["opus_bitrate"])
 
-        # 5. 轉發至 Fish Speech 伺服器
         model_name = body.get("model", "")
-        raw_target = get_target(route_table, model_name)
-        
-        # 修正 target 路徑
-        target = raw_target.replace("/v1/chat/completions", "").replace("//v1", "/v1")
-        target = f"{target.rstrip('/')}/v1/tts"
+        target = get_model_info(route_table, model_name)["url"]
 
-        print(f">>> 最終音色: {voice_name} | Seed: {seed} | 語速: {speed}")
-        print(f">>> 朗讀內容: {payload['text'][:30]}...")
+        print(f">>> TTS | 音色: {voice_name} | 格式: {response_format} | 語速: {speed} | 內容: {clean_text[:30]}...")
 
         async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                target,
-                json=payload
-            )
+            resp = await client.post(target, json=payload)
 
             if resp.status_code != 200:
                 print(f"後端報錯: {resp.text}")
                 return Response(content=resp.text, status_code=resp.status_code, media_type="application/json")
-            #A 回傳pcm但payload要改成wav
+
             audio_content = resp.content
-            if audio_content.startswith(b"RIFF"):
-                actual_sr = struct.unpack_from('<I', audio_content, 24)[0]
-                print(f">>> WAV 實際 sample_rate: {actual_sr}")
-                audio_content = audio_content[44:]   # 剝離 WAV header
+            # pcm 模式：剝離 WAV header (44 bytes)
+            if response_format == "pcm" and audio_content.startswith(b"RIFF"):
+                actual_sr = struct.unpack_from("<I", audio_content, 24)[0]
+                print(f">>> WAV sample_rate: {actual_sr}")
+                audio_content = audio_content[44:]
 
-            # audio_content = resp.content
-            # if audio_content.startswith(b"RIFF"):
-            #     actual_sr = struct.unpack_from('<I', audio_content, 24)[0]
-            #     print(f">>> WAV 實際 sample_rate: {actual_sr}")  # 加这行
-            #     audio_content = audio_content[44:]
-
-            # audio_content = resp.content
-            # if audio_content.startswith(b"RIFF"):
-            #     audio_content = audio_content[44:]  # 剥离 44 字节 WAV 头
-
-            return Response(
-                content=audio_content,
-            media_type="audio/pcm",  # ✅ 告诉 pipecat 这是 raw PCM
-            )
-            #B 回傳mpeg 那payload要改回mp3
-            # return Response(
-            #     content=resp.content,
-            # media_type="audio/mpeg",  # ✅ 告诉 pipecat 这是 raw PCM
-            # )
+            media_type = RESPONSE_FORMAT_MEDIA.get(response_format, "audio/pcm")
+            return Response(content=audio_content, media_type=media_type)
 
 
 
-
-
-#            return Response(
- #               content=resp.content,
-  #              media_type=resp.headers.get("content-type", "audio/pcm"),
-   #             headers={"Content-Disposition": "attachment; filename=speech.pcm"}
-    #        )
-
-    # async def tts(request: Request):
-    #     key = extract_key(request)
-    #     user = decode_api_key(key)
-        
-    #     body = await request.json()
-
-    #     raw_input = body.get("text", body.get("input", ""))
-    #     clean_text, voice_name, speed = parse_ssml_to_fish_params(raw_input)
-    #     seed = body.get("seed", 42)
-    #     if not clean_text:
-    #         clean_text = raw_input 
-
-    #     # 3. 讀取對應音檔並轉為 Base64
-    #     voice_path = os.path.join(VOICE_DIR, f"{voice_name}.wav") # 支援 wav/mp3
-    #     if not os.path.exists(voice_path):
-    #         voice_path = os.path.join(VOICE_DIR, f"{voice_name}.mp3")
-    #     text_path = os.path.join(VOICE_DIR, f"{voice_name}.txt")
-
-
-    #     references = []
-    #     if os.path.exists(voice_path):
-    #         with open(voice_path, "rb") as f:
-    #             audio_base64 = base64.b64encode(f.read()).decode('utf-8')
-
-    #         ref_text = ""
-    #         if os.path.exists(text_path):
-    #             with open(text_path, "r", encoding="utf-8") as f:
-    #                 ref_text = f.read().strip()
-            
-    #         references = [{
-    #             "audio": audio_base64,
-    #             "text": ref_text
-    #         }]
-    #     else:
-    #         print(f"警告: 找不到音檔 {voice_path}，將不帶 references")
-
-    #     # 4. 組裝給 Fish Speech 的 payload
-    #     payload = {
-    #         "text": clean_text,      # 洗乾淨的文字
-    #         "references": references, # 提取出來的音色
-    #         "format": body.get("response_format", body.get("format", "mp3")),
-    #         "normalize": True,
-    #         "speed": speed,
-    #     "seed": seed           # 從 SSML 提取的語速
-    #     }
-
-    #     # 5. 轉發邏輯
-    #     model_name = body.get("model", "") 
-    #     raw_target = get_target(route_table, model_name)
-        
-    #     target = raw_target.replace("/v1/chat/completions", "").replace("//v1", "/v1")
-    #     target = f"{target.rstrip('/')}/v1/tts"
-
-    #     print(f">>> 提取音色: {voice_name} | 語速: {speed}")
-    #     print(f">>> 最終朗讀內容: {payload['text']}")
-
-    #     async with httpx.AsyncClient(timeout=120) as client:
-    #         # 記得帶上 Header 轉發給後端
-    #         resp = await client.post(
-    #             target, 
-    #             json=payload, 
-    #            #headers={"Authorization": f"Bearer {key}"} 
-    #         )
-
-    #         if resp.status_code != 200:
-    #             return Response(content=resp.text, status_code=resp.status_code, media_type="application/json")
-
-    #         return Response(
-    #             content=resp.content,
-    #             media_type=resp.headers.get("content-type", "audio/mpeg"),
-    #             headers={"Content-Disposition": "attachment; filename=speech.mp3"}
-    #         )
 
 
     #embedding處理
@@ -514,11 +420,8 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         body = await request.json()
         model_name = body.get("model", "")
         
-        # 3. 取得轉發目標並替換正確路徑
-        raw_target = get_target(route_table, model_name)
-        # 假設 get_target 回傳包含 `/v1/chat/completions`，將其替換為 `/v1/embeddings`
-        target = raw_target.replace("/v1/chat/completions", "").replace("//v1", "/v1")
-        target = f"{target.rstrip('/')}/v1/embeddings"
+        # 3. 取得轉發目標
+        target = get_model_info(route_table, model_name)["url"]
         
         print(f">>> 轉發 Embeddings 目標: {target}")
 
@@ -544,83 +447,3 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         
     # VOICE_DIR = "./voices"
     # #於voices下放入對應wav檔以及txt以便讀取
-    # #fish speech tts路由邏輯
-    # @app.post("/v1/tts")
-    # @app.post("/v1/audio/speech")
-    # async def tts(request: Request):
-    #     key = extract_key(request)
-    #     user = decode_api_key(key)
-        
-    #     body = await request.json()
-
-    #     voice_name = body.get("voice", "default")
-        
-    #     # 格式對應轉換：OpenAI -> Fish 原生
-    #     if "input" in body:
-    #         body["text"] = body.pop("input")
-
-
-    #     # 3. 讀取對應音檔並轉為 Base64
-    #     voice_path = os.path.join(VOICE_DIR, f"{voice_name}.wav") # 支援 wav/mp3
-    #     text_path = os.path.join(VOICE_DIR, f"{voice_name}.txt")
-
-    #     if "response_format" in body:
-    #         body["format"] = body.pop("response_format")
-
-    #     if os.path.exists(voice_path):
-    #         with open(voice_path, "rb") as f:
-    #             audio_base64 = base64.b64encode(f.read()).decode('utf-8')
-
-    #         ref_text = ""
-    #         if os.path.exists(text_path):
-    #             with open(text_path, "r", encoding="utf-8") as f:
-    #                 ref_text = f.read().strip()
-    #                 print(f"DEBUG: 找到標註文本 - {ref_text}")
-
-    #         # 組裝 Fish Speech 格式
-    #         body["references"] = [{
-    #             "audio": audio_base64,
-    #             "text": ref_text  # 將讀取到的文本放入
-    #         }]
-            
-    #         if "voice" in body: del body["voice"]
-    #     else:
-    #         print(f"警告: 找不到音檔 {voice_path}")
-
-    #     payload = {
-    #     "text": body.get("text", ""),
-    #     "references": body.get("references", []),
-    #     "format": body.get("format", "mp3"),
-    #     "normalize": True,
-    #     # 如果你有使用其他 Fish 特定參數如 normalize, mp3_bitrate 可加在這
-    #     }
-
-    #     model_name = body.get("model", "") 
-
-    #     raw_target = get_target(route_table, model_name)
-    #     # 這裡建議先 print 出來確認 raw_target 是什麼
-    #     print(f"DEBUG: raw_target = {raw_target}")
-
-    #     target = raw_target.replace("/v1/chat/completions", "") # 先拔掉舊路徑
-    #     target = f"{target}/v1/tts" # 再補上新路徑，確保中間只有一個 
-    #     target = target.replace("//v1", "/v1")
-
-    #     print(f">>> 發送文字: {payload['text']}")
-    #     print(f">>> 請求目標: {target}")
-
-    #     async with httpx.AsyncClient(timeout=120) as client:
-    #         # 記得帶上 Header 轉發給後端
-    #         resp = await client.post(
-    #             target, 
-    #             json=payload, 
-    #            #headers={"Authorization": f"Bearer {key}"} 
-    #         )
-
-    #         if resp.status_code != 200:
-    #             return Response(content=resp.text, status_code=resp.status_code, media_type="application/json")
-
-    #         return Response(
-    #             content=resp.content,
-    #             media_type=resp.headers.get("content-type", "audio/mpeg"),
-    #             headers={"Content-Disposition": "attachment; filename=speech.mp3"}
-    #         )

@@ -38,8 +38,8 @@ route_table = build_route_table(config,AI_SERVER_IP)
 
 print("=== AI Gateway 啟動 ===")
 print("已載入路由表:")
-for model, url in route_table.items():
-    print(f"{model} -> {url} ")
+for model, info in route_table.items():
+    print(f"[{info['type']:10s}] {model} -> {info['url']} ")
 print("========================")
 
 register_proxy_routes(app, route_table, config)

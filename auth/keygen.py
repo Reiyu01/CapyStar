@@ -145,7 +145,7 @@ import re
 import yaml
 from fastapi import Request, HTTPException
 from dotenv import load_dotenv
-from litellm.proxy.proxy_server import UserAPIKeyAuth
+#from litellm.proxy.proxy_server import UserAPIKeyAuth
 
 # 1. 讀取設定檔 (確保 config.yaml 裡有 role_permissions -> student)
 with open("config.yaml", "r") as f:

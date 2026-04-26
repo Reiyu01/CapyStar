@@ -1,29 +1,35 @@
 models:
   # - name: "mistral-675b"
   #   path: "/mistral"
+  #   type: "llm"
   #   provider: "vllm"
 
   - name: "nemotron-3-super-120b"
     path: "/nemotron-3-super-120b"
+    type: "llm"
     provider: "vllm"
 
   - name: "gpt-oss-120b"
     path: "/gpt-oss-120b"
+    type: "llm"
     provider: "vllm"
-  
+
   - name: "qwen2.5vl:72b"
     path: "/qwen2.5vl-72b"
+    type: "llm"
     provider: "ollama"
 
   - name: "qwen3-asr-1.7b"
     path: "/qwen3-asr-1.7b"
+    type: "asr"
     provider: "vllm"
 
   - name: "fish-speech-server"
     path: "/fish-speech-server"
+    type: "tts"
     provider: "vllm"
-
 
   - name: "qwen3-embedding-8b"
     path: "/qwen3-embedding-8b"
+    type: "embedding"
     provider: "vllm"
