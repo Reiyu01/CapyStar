@@ -286,12 +286,12 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
     }
 
     # Fish Speech 各格式預設參數
-    # wav/pcm: sample_rate 可選 8000/16000/24000/32000/44100，預設 44100
+    # wav/pcm: sample_rate 可選 8000/16000/24000/32000/44100，預設 24000 (pipecat 相容)
     # mp3:     sample_rate 可選 32000/44100，bitrate 64/128(預設)/192 kbps
     # opus:    sample_rate 固定 48000，bitrate -1000(auto)/24000/32000(預設)/48000/64000
     FORMAT_DEFAULTS: dict = {
-        "wav":  {"sample_rate": 44100},
-        "pcm":  {"sample_rate": 44100},
+        "wav":  {"sample_rate": 24000},
+        "pcm":  {"sample_rate": 24000},
         "mp3":  {"sample_rate": 44100, "mp3_bitrate": 128},
         "opus": {"sample_rate": 48000, "opus_bitrate": 32000},
     }
@@ -395,11 +395,21 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
                 return Response(content=resp.text, status_code=resp.status_code, media_type="application/json")
 
             audio_content = resp.content
-            # pcm 模式：剝離 WAV header (44 bytes)
+            # pcm 模式：掃描 RIFF chunk 找到 "data" 區塊再剝，避免額外 chunk 導致偶移
             if response_format == "pcm" and audio_content.startswith(b"RIFF"):
                 actual_sr = struct.unpack_from("<I", audio_content, 24)[0]
                 print(f">>> WAV sample_rate: {actual_sr}")
-                audio_content = audio_content[44:]
+                # 掃描找 data chunk
+                offset = 12
+                pcm_data = audio_content[44:]  # fallback
+                while offset + 8 <= len(audio_content):
+                    tag  = audio_content[offset:offset + 4]
+                    size = struct.unpack_from("<I", audio_content, offset + 4)[0]
+                    if tag == b"data":
+                        pcm_data = audio_content[offset + 8: offset + 8 + size]
+                        break
+                    offset += 8 + size
+                audio_content = pcm_data
 
             media_type = RESPONSE_FORMAT_MEDIA.get(response_format, "audio/pcm")
             return Response(content=audio_content, media_type=media_type)
