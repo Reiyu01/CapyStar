@@ -269,6 +269,50 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
             return Response(content=resp.content, media_type="text/plain")
         return Response(content=resp.content, status_code=200, media_type="application/json")
 
+    # Fish Speech ASR — POST /v1/asr (multipart/form-data)
+    # 欄位: audio (file), language (str|null), ignore_timestamps (bool, 預設 true)
+    # 回傳: {"text": "...", "duration": ..., "segments": [...]}
+    @app.post("/v1/asr")
+    async def fish_asr_proxy(request: Request):
+        key = extract_key(request)
+        user = decode_api_key(key)
+        print(f">>> Fish ASR 請求來自: {user['student_id']}")
+
+        form = await request.form()
+        model_name       = form.get("model", "fish-speech-server")
+        language         = form.get("language", None)
+        ignore_timestamps = form.get("ignore_timestamps", "true").lower() != "false"
+
+        info   = get_model_info(route_table, model_name)
+        target = info["base_url"] + "/v1/asr"
+        print(f">>> Fish ASR 轉發目標: {target}")
+
+        audio_field = form.get("audio")
+        if audio_field is None:
+            return Response(
+                content='{"error": "缺少 audio 欄位"}',
+                status_code=400,
+                media_type="application/json",
+            )
+
+        audio_bytes   = await audio_field.read()
+        filename      = audio_field.filename or "audio.wav"
+        content_type  = audio_field.content_type or "audio/wav"
+
+        files = {"audio": (filename, audio_bytes, content_type)}
+        data  = {"ignore_timestamps": str(ignore_timestamps).lower()}
+        if language:
+            data["language"] = language
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(target, files=files, data=data)
+
+        if resp.status_code != 200:
+            print(f">>> Fish ASR 後端報錯: {resp.text}")
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+
+        return Response(content=resp.content, status_code=200, media_type="application/json")
+
     @app.get("/v1/realtime/models")
     async def list_models():
         return {
@@ -334,7 +378,7 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         voice_name      = body.get("voice") or ssml_voice or "taiwan_girl"
         speed           = body.get("speed", ssml_speed if ssml_speed is not None else 1.0)
-        response_format = body.get("response_format", "pcm")  # OpenAI 預設 mp3，pipecat 預設 pcm
+        response_format = body.get("response_format", "mp3")  # 未指定則預設 mp3
 
         if response_format not in RESPONSE_FORMAT_MEDIA:
             return Response(
