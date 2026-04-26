@@ -221,39 +221,53 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
                 await websocket.close()
 
 
-    # POST ASR — OpenAI 標準: POST /v1/audio/transcriptions (multipart/form-data)
+    # POST ASR — 同時支援 application/json 及 multipart/form-data
     @app.post("/v1/audio/transcriptions")
     async def asr_proxy(request: Request):
         key = extract_key(request)
         user = decode_api_key(key)
         print(f">>> ASR 請求來自: {user['student_id']}")
 
-        form = await request.form()
-        model_name = form.get("model")
-        response_format = form.get("response_format", "json")
+        content_type = request.headers.get("content-type", "")
+        print(f">>> ASR Content-Type: {content_type}")
 
-        target = get_model_info(route_table, model_name)["url"]
-        print(f">>> ASR 轉發目標: {target}")
+        if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
+            # --- multipart 路徑 ---
+            form = await request.form()
+            model_name      = form.get("model", "qwen3-asr-1.7b")
+            response_format = form.get("response_format", "json")
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            files = {}
-            data = {}
-            for k, v in form.items():
-                if isinstance(v, UploadFile):
-                    file_content = await v.read()
-                    files[k] = (v.filename, file_content, v.content_type)
-                else:
-                    data[k] = v
+            target = get_model_info(route_table, model_name)["url"]
+            print(f">>> ASR 轉發目標: {target}")
 
-            resp = await client.post(target, files=files, data=data)
+            async with httpx.AsyncClient(timeout=60) as client:
+                files = {}
+                data  = {}
+                for k, v in form.items():
+                    if isinstance(v, UploadFile):
+                        file_content = await v.read()
+                        files[k] = (v.filename, file_content, v.content_type)
+                    else:
+                        data[k] = v
+                resp = await client.post(target, files=files, data=data)
+        else:
+            # --- JSON 路徑 ---
+            body            = await request.json()
+            model_name      = body.get("model", "qwen3-asr-1.7b")
+            response_format = body.get("response_format", "json")
 
-            if resp.status_code != 200:
-                return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+            target = get_model_info(route_table, model_name)["url"]
+            print(f">>> ASR 轉發目標: {target}")
 
-            # 統一回傳 OpenAI 格式: {"text": "..."}
-            if response_format == "text":
-                return Response(content=resp.content, media_type="text/plain")
-            return Response(content=resp.content, status_code=200, media_type="application/json")
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(target, json=body)
+
+        if resp.status_code != 200:
+            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+
+        if response_format == "text":
+            return Response(content=resp.content, media_type="text/plain")
+        return Response(content=resp.content, status_code=200, media_type="application/json")
 
     @app.get("/v1/realtime/models")
     async def list_models():
