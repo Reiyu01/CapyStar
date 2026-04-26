@@ -1,0 +1,44 @@
+model_list:
+  # 1. 本地 vLLM 模型設定
+  - model_name: nemotron-3-super-120b        # 前端呼叫時使用的名稱
+    litellm_params:
+      model: openai/nemotron-3-super-120b  # 這裡填寫你 vLLM 載入的模型路徑
+      api_base: "http://140.133.77.129:8000/nemotron-3-super-120b/v1" # vLLM 的 API 位址 (若在 Docker 內請改為 host.docker.internal)
+      api_key: "not-needed"           # vLLM 通常不需要，但 LiteLLM 要求填寫
+      model_info:
+        input_cost_per_token: 0.000001   # 每 Token 0.000001 美金 (即每百萬 1 USD)
+        output_cost_per_token: 0.000002  # 輸出通常比較貴
+#openai azure ~~~~~~
+general_settings:
+  # 2. 指定自定義驗證函式路徑 (資料夾.檔名.函式名)
+  custom_auth: auth.keygen.decode_api_key
+
+  # 3. 自定義職位權限表 (供 Python 腳本讀取)
+  #rpm = 每分鐘請求限制
+  #tpm = 每分鐘token消耗
+  #max_budget = 總金額上限
+
+  permissions_setting:
+    student:
+      rpm_limit: 5
+      tpm_limit: 10000
+      max_budget: 1.0
+    teacher:
+      rpm_limit: 50
+      tpm_limit: 100000
+      max_budget: 10.0
+    admin:
+      rpm_limit: 1000
+      tpm_limit: 1000000
+      max_budget: 100.0
+
+router_settings:
+  # 4. Redis 設定 (用於儲存即時消耗量與速率限制)
+  redis_url: "redis://localhost:6379" # 若有密碼請用 redis://:password@host:port
+  enable_pre_call_checks: True             # 必須開啟，LiteLLM 才會執行攔截動作
+  
+  # 路由策略
+  routing_strategy: simple-shuffle
+# 5. 日誌設定 (選配：可在終端機看到詳細轉發資訊)
+litellm_settings:
+  set_verbose: true # 開發階段建議開啟，可以看到驗證是否成功

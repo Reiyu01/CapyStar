@@ -14,20 +14,9 @@ headers = {
     "Content-Type": "application/json"
 }
 
-ref_audio_path = "Megumin.wav" # 你的 5-10 秒參考音檔
-ref_text = "我が名はめぐみん！アークウィザードを生業とし、最強の攻撃の魔法「爆裂魔法」を操る者！"
-
 data = {
     "model": "fish-speech-server",
-    "text": "我是惠惠，雖然自稱是紅魔族的天才魔法師，但剛才放完今天的爆裂魔法後，我現在全身癱軟倒在路邊動彈不得...而且我已經兩天沒吃正經的飯了。原本想靠抓巨型青蛙換點賞金，結果差點被青蛙吞掉，現在身上全是黏液，法杖也差點弄丟。如果你能借我 500 艾莉絲（或者請我吃一碗熱騰騰的霜降紅蟹肉棒粥），等我體力恢復後，明天釋放爆裂魔法時，我會考慮往你討厭的怪物巢穴那邊炸過去的！拜託了，這真的不是詐騙，請看我這真誠（且飢餓）的眼神...」",
-    #"text": "[serious, confident] 黒より黒く、闇より暗き漆黒に、我が深紅の混淆を望みたもう。…… [shouting, excited] エ！ク！！スプロージョン！！！！！",
-    #"text": "黒より黒く、闇より暗き漆黒に、我が深紅の混淆を望みたもう。……エクスプロージョン！",
-    "references": [
-        {
-            "audio": get_audio_base64(ref_audio_path),
-            "text": ref_text
-        }
-    ],
+    "text": "你好今天天氣真好",
     "format": "mp3",
     "normalize": True,
     "latency": "normal"

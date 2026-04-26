@@ -14,12 +14,12 @@ headers = {
     "Content-Type": "application/json"
 }
 
-ref_audio_path = "jax.wav" # 你的 5-10 秒參考音檔
-ref_text = "cuz if it's a new character. we're going to have to redo this whole theme song. we've been stuck here for years. old kinger over there supposedly been here the longest. that's why he's crazy. haha"
+ref_audio_path = "gojo.wav" # 你的 5-10 秒參考音檔
+ref_text = "よ久しぶり大 まじそうかそうだなそうかもな。秒天井ユが独領域 展開無料。空マジマジ安く触らないでもらえるかしらんドちゃんた照れるなよ 一落 ガさ五条悟の大好きなところで山手 宣言"
 
 data = {
     "model": "fish-speech-server",
-    "text": "Good night Sonya",
+    "text": "你好，我是五條悟。雖然我現在變成了 2.5 條，但我的六眼依然能看穿這世界的虛偽。我需要 300 元買最強的特級咒具——『強力膠』來修復我的下半身。只要你助我復活，我就帶你一起進入我的領域『無量空處』，讓你不用讀書也能掌握宇宙的終極知識。",
     #"text": "[serious, confident] 黒より黒く、闇より暗き漆黒に、我が深紅の混淆を望みたもう。…… [shouting, excited] エ！ク！！スプロージョン！！！！！",
     #"text": "黒より黒く、闇より暗き漆黒に、我が深紅の混淆を望みたもう。……エクスプロージョン！",
     "references": [

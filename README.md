@@ -90,7 +90,7 @@ except Exception as e:
 
 ```bash
 # 加上 -N (no-buffer) 確保即時看到輸出
-curl -N http://163.18.26.230:8000/v1/chat/completions \
+curl -N https://b225.54ucl.com/capystar/v1/chat/completions \
  -H "Content-Type: application/json" \
  -d '{"model":"mistral-675b","messages":[{"role":"user","content":"你好"}], "stream": true}'
 ```

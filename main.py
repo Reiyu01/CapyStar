@@ -31,10 +31,6 @@ app.add_middleware(
 )
 # ----------------------
 
-
-
-
-
 #建構可讀取python格式
 config = load_config("config.yaml")
 #建構列表(模型與對應網址)

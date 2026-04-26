@@ -8,7 +8,7 @@ from auth.keygen import extract_key, decode_api_key
 import os
 import base64
 import re
-import struct
+
 
 #TODO: 目前都是用print輸出log，後續搭配loggingg以及資料庫來做紀錄
 def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
@@ -55,7 +55,6 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         #         return resp.json()
             
     #Websocket ASR路由邏輯
-    @app.websocket("/v1/realtime")
     @app.websocket("/v1/realtime/{model_name}")
     @app.websocket("/v1/realtime/audio/transcriptions")
     # async def asr_websocket_proxy(websocket: WebSocket, model_name: str):
@@ -128,12 +127,9 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
 
 
-    async def asr_websocket_proxy(websocket: WebSocket, model_name: str = "qwen3-asr-1.7b"):
+    async def asr_websocket_proxy(websocket: WebSocket, model_name: str):
         #連線驗證
         api_key = websocket.query_params.get("api_key") or websocket.headers.get("Authorization")
-
-        if api_key and api_key.startswith("Bearer "):
-            api_key = api_key.replace("Bearer ", "")
         try:
             user = decode_api_key(api_key)
             print(f">>> ASR 請求來自: {user['student_id']}")
@@ -151,40 +147,16 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
             async with websockets.connect(target_ws_url, ping_interval=20) as backend_ws:
 
                 async def forward_to_backend():
-                    """前端(Pipecat) -> 後端(ASR) (音訊/指令)"""
-                    audio_bytes_received = 0  # 🌟 新增：用來計算收到多少位元組的聲音
-                    
+                    """前端 ->後端 (音訊/指令) """
+                    # 修正：使用 receive() 處理所有類型的 Frame
                     while True:
                         data = await websocket.receive()
                         if "bytes" in data:
-                            audio_chunk = data["bytes"]
-                            audio_bytes_received += len(audio_chunk)
-                            
-                            # 🌟 新增：每收到約 16KB 的聲音（大約半秒），印出一次提示
-                            if audio_bytes_received > 16000:
-                                print(f"🟢 [ASR Proxy] 收到來自 Pipecat 的聲音封包! 已轉發 {audio_bytes_received} bytes")
-                                audio_bytes_received = 0 # 歸零重新計算
-                                
-                            await backend_ws.send(audio_chunk)
+                            await backend_ws.send(data["bytes"])
                         elif "text" in data:
-#                            print(f"📝 [ASR Proxy] 收到文字指令: {data['text']}")
                             await backend_ws.send(data["text"])
                         elif data["type"] == "websocket.disconnect":
-                            print("❌ [ASR Proxy] Pipecat 斷開連線")
                             break
-
-
-                # async def forward_to_backend():
-                #     """前端 ->後端 (音訊/指令) """
-                #     # 修正：使用 receive() 處理所有類型的 Frame
-                #     while True:
-                #         data = await websocket.receive()
-                #         if "bytes" in data:
-                #             await backend_ws.send(data["bytes"])
-                #         elif "text" in data:
-                #             await backend_ws.send(data["text"])
-                #         elif data["type"] == "websocket.disconnect":
-                #             break
 
                 async def forward_to_client():
                     """後端 ->前端 (辨識結果) """
@@ -224,25 +196,10 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         model_name = form.get("model")
         
         # 獲取後端 Base URL
-        raw_target = target = get_target(route_table, model_name)
+        target = target = get_target(route_table, model_name)
         # target_base = raw_target.split("/v1")[0]
         # target_url = f"{target_base}/{model_name}"
-#        if not target.endswith("/v1/audio/transcriptions"):
- #          target = f"{target.rstrip('/')}/v1/audio/transcriptions"
 
-
-#4/21
-        import urllib.parse
-        parsed = urllib.parse.urlparse(raw_target)
-        
-        # 重新拼接：協定 + 主機(含Port) + 標準 ASR 路徑
-        target = f"{parsed.scheme}://{parsed.netloc}/v1/audio/transcriptions"
-
-        print(f"DEBUG: Proxying to {target}") # 加上這行看輸出的網址對不對
-        
-        
-        
-        
         # 準備轉發
         async with httpx.AsyncClient(timeout=60) as client:
             files = {}
@@ -329,7 +286,7 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         # --- 保底檢查 ---
         if not os.path.exists(voice_path):
-            fallback_name = "taiwan_girl" # 請確保你的 voices 資料夾裡有 kobe.wav
+            fallback_name = "kobe" # 請確保你的 voices 資料夾裡有 kobe.wav
             print(f"警告: 找不到音色 {voice_name}，自動切換至保底音色 {fallback_name}")
             voice_name = fallback_name
             voice_path = os.path.join(VOICE_DIR, f"{voice_name}.wav")
@@ -361,12 +318,11 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         payload = {
             "text": clean_text,
             "references": references,
-            "format": "wav",
-#這邊可選mp3 or wav
+            "format": "pcm",
             "sample_rate": 24000,
             # "format": body.get("response_format", body.get("format", "mp3")),
             "normalize": True,
-            "latency": "normal",
+	    "latency": "normal",
             "speed": speed,
             "seed": seed
         }
@@ -391,37 +347,16 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
             if resp.status_code != 200:
                 print(f"後端報錯: {resp.text}")
                 return Response(content=resp.text, status_code=resp.status_code, media_type="application/json")
-            #A 回傳pcm但payload要改成wav
-            audio_content = resp.content
-            if audio_content.startswith(b"RIFF"):
-                actual_sr = struct.unpack_from('<I', audio_content, 24)[0]
-                print(f">>> WAV 實際 sample_rate: {actual_sr}")
-                audio_content = audio_content[44:]   # 剝離 WAV header
 
-            # audio_content = resp.content
-            # if audio_content.startswith(b"RIFF"):
-            #     actual_sr = struct.unpack_from('<I', audio_content, 24)[0]
-            #     print(f">>> WAV 實際 sample_rate: {actual_sr}")  # 加这行
-            #     audio_content = audio_content[44:]
+    	    # 剥离 WAV 头，直接返回 raw PCM
+    	    audio_content = resp.content
+    	    if audio_content.startswith(b"RIFF"):
+        	audio_content = audio_content[44:]  # 剥离 44 字节 WAV 头
 
-            # audio_content = resp.content
-            # if audio_content.startswith(b"RIFF"):
-            #     audio_content = audio_content[44:]  # 剥离 44 字节 WAV 头
-
-            return Response(
-                content=audio_content,
-            media_type="audio/pcm",  # ✅ 告诉 pipecat 这是 raw PCM
+    	    return Response(
+            	content=audio_content,
+        	media_type="audio/pcm",  # ✅ 告诉 pipecat 这是 raw PCM
             )
-            #B 回傳mpeg 那payload要改回mp3
-            # return Response(
-            #     content=resp.content,
-            # media_type="audio/mpeg",  # ✅ 告诉 pipecat 这是 raw PCM
-            # )
-
-
-
-
-
 #            return Response(
  #               content=resp.content,
   #              media_type=resp.headers.get("content-type", "audio/pcm"),
@@ -471,7 +406,7 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
     #         "format": body.get("response_format", body.get("format", "mp3")),
     #         "normalize": True,
     #         "speed": speed,
-    #     "seed": seed           # 從 SSML 提取的語速
+	#     "seed": seed           # 從 SSML 提取的語速
     #     }
 
     #     # 5. 轉發邏輯

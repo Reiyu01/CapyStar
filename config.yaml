@@ -1,7 +1,7 @@
 models:
-  - name: "mistral-675b"
-    path: "/mistral"
-    provider: "vllm"
+  # - name: "mistral-675b"
+  #   path: "/mistral"
+  #   provider: "vllm"
 
   - name: "nemotron-3-super-120b"
     path: "/nemotron-3-super-120b"
@@ -21,4 +21,9 @@ models:
 
   - name: "fish-speech-server"
     path: "/fish-speech-server"
+    provider: "vllm"
+
+
+  - name: "qwen3-embedding-8b"
+    path: "/qwen3-embedding-8b"
     provider: "vllm"

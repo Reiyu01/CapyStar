@@ -14,12 +14,12 @@ headers = {
     "Content-Type": "application/json"
 }
 
-ref_audio_path = "jax.wav" # 你的 5-10 秒參考音檔
-ref_text = "cuz if it's a new character. we're going to have to redo this whole theme song. we've been stuck here for years. old kinger over there supposedly been here the longest. that's why he's crazy. haha"
+ref_audio_path = "kobe.mp3" # 你的 5-10 秒參考音檔
+ref_text = "很多人以為我在 2020 年那場直升機意外中離開了，其實那只是我為了開發新動作曼巴旋風劈而進行的高空特技演習。但這幾年我看著現在的湖人隊，我實在忍不住了。我已經練成了鋼鐵曼巴形態，準備從科比比進化成科比塊，重新降臨洛杉磯史坦波中心。孩子们请不要再玩梗了，抖音彼岸徘沃还有那个该死的佐巴扬，孩子们我复活了第一个请他们吃肘击"
 
 data = {
     "model": "fish-speech-server",
-    "text": "Good night Sonya",
+    "text": "孩子們想我嗎，黃俊霖進度回報呢",
     #"text": "[serious, confident] 黒より黒く、闇より暗き漆黒に、我が深紅の混淆を望みたもう。…… [shouting, excited] エ！ク！！スプロージョン！！！！！",
     #"text": "黒より黒く、闇より暗き漆黒に、我が深紅の混淆を望みたもう。……エクスプロージョン！",
     "references": [
