@@ -44,6 +44,7 @@ def build_route_table(config: dict, base_url: str) -> dict:
         base       = f"{base_url}{model['path']}"
         table[model["name"]] = {
             "type":     model_type,
+            "provider": model.get("provider", "vllm"),
             "base_url": base,
             "url":      f"{base}{endpoint}",
         }

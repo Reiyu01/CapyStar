@@ -24,7 +24,10 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         body = await request.json()
         is_stream = body.get("stream", False)
-        target = get_target(route_table, body.get("model",""))
+        # 永遠用 base_url + /v1/chat/completions，不受模型 type 影響
+        model_name = body.get("model", "")
+        info   = get_model_info(route_table, model_name)
+        target = info["base_url"] + "/v1/chat/completions"
         print(f">>> 轉發目標: {target}")
 
         if is_stream:
@@ -222,6 +225,7 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
 
     # POST ASR — 同時支援 application/json 及 multipart/form-data
+    # 若後端 provider=vllm，自動將請求轉換為 /v1/chat/completions + input_audio 格式
     @app.post("/v1/audio/transcriptions")
     async def asr_proxy(request: Request):
         key = extract_key(request)
@@ -231,43 +235,93 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         content_type = request.headers.get("content-type", "")
         print(f">>> ASR Content-Type: {content_type}")
 
+        # 解析請求，取出 model、audio bytes、audio format
+        audio_bytes  = None
+        audio_format = "wav"
+        response_format = "json"
+
         if "multipart/form-data" in content_type or "application/x-www-form-urlencoded" in content_type:
-            # --- multipart 路徑 ---
-            form = await request.form()
+            form            = await request.form()
             model_name      = form.get("model", "qwen3-asr-1.7b")
             response_format = form.get("response_format", "json")
-
-            target = get_model_info(route_table, model_name)["url"]
-            print(f">>> ASR 轉發目標: {target}")
-
-            async with httpx.AsyncClient(timeout=60) as client:
-                files = {}
-                data  = {}
-                for k, v in form.items():
-                    if isinstance(v, UploadFile):
-                        file_content = await v.read()
-                        files[k] = (v.filename, file_content, v.content_type)
-                    else:
-                        data[k] = v
-                resp = await client.post(target, files=files, data=data)
+            file_field      = form.get("file") or form.get("audio")
+            if file_field and isinstance(file_field, UploadFile):
+                audio_bytes  = await file_field.read()
+                fname        = file_field.filename or "audio.wav"
+                audio_format = fname.rsplit(".", 1)[-1].lower() if "." in fname else "wav"
         else:
-            # --- JSON 路徑 ---
             body            = await request.json()
             model_name      = body.get("model", "qwen3-asr-1.7b")
             response_format = body.get("response_format", "json")
+            # 若 JSON body 裡直接含 input_audio，取出 bytes
+            try:
+                audio_b64    = body["messages"][0]["content"][0]["input_audio"]["data"]
+                audio_format = body["messages"][0]["content"][0]["input_audio"].get("format", "wav")
+                audio_bytes  = base64.b64decode(audio_b64)
+            except (KeyError, IndexError):
+                audio_bytes = None
 
-            target = get_model_info(route_table, model_name)["url"]
-            print(f">>> ASR 轉發目標: {target}")
+        info     = get_model_info(route_table, model_name)
+        provider = info.get("provider", "vllm")
 
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(target, json=body)
+        async with httpx.AsyncClient(timeout=60) as client:
+            if provider == "vllm" and audio_bytes is not None:
+                # vLLM ASR 後端不支援原生 /v1/audio/transcriptions
+                # 轉換成 /v1/chat/completions + input_audio (base64)
+                target = info["base_url"] + "/v1/chat/completions"
+                print(f">>> ASR vLLM 轉換為 chat/completions: {target}")
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data":   base64.b64encode(audio_bytes).decode(),
+                                        "format": audio_format,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+                resp = await client.post(target, json=payload)
 
-        if resp.status_code != 200:
-            return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+                if resp.status_code != 200:
+                    return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
 
-        if response_format == "text":
-            return Response(content=resp.content, media_type="text/plain")
-        return Response(content=resp.content, status_code=200, media_type="application/json")
+                # 把 chat/completions 回傳包裝成 OpenAI transcription 格式
+                try:
+                    text = resp.json()["choices"][0]["message"]["content"]
+                except (KeyError, IndexError):
+                    text = resp.text
+                result = {"text": text}
+                if response_format == "text":
+                    return Response(content=text, media_type="text/plain")
+                import json as _json
+                return Response(content=_json.dumps(result, ensure_ascii=False), status_code=200, media_type="application/json")
+
+            else:
+                # 原生支援 /v1/audio/transcriptions 的後端（如 Whisper），直接轉發
+                target = info["url"]
+                print(f">>> ASR 直接轉發: {target}")
+                if audio_bytes is not None:
+                    resp = await client.post(
+                        target,
+                        files={"file": (f"audio.{audio_format}", audio_bytes, f"audio/{audio_format}")},
+                        data={"model": model_name, "response_format": response_format},
+                    )
+                else:
+                    resp = await client.post(target, content=await request.body(),
+                                             headers={"content-type": content_type})
+
+                if resp.status_code != 200:
+                    return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+                if response_format == "text":
+                    return Response(content=resp.content, media_type="text/plain")
+                return Response(content=resp.content, status_code=200, media_type="application/json")
 
     # Fish Speech ASR — POST /v1/asr (multipart/form-data)
     # 欄位: audio (file), language (str|null), ignore_timestamps (bool, 預設 true)
