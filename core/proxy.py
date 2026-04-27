@@ -147,7 +147,7 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
             return
 
         info = get_model_info(route_table, model_name)
-        target_ws_url = info["base_url"].replace("http", "ws", 1) + "/v1/realtime"
+        target_ws_url = info["base_url"].replace("http", "ws", 1)
 
         await websocket.accept()
         
@@ -320,7 +320,7 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         voice_name      = body.get("voice") or ssml_voice or "taiwan_girl"
         speed           = body.get("speed", ssml_speed if ssml_speed is not None else 1.0)
-        response_format = body.get("response_format", "pcm")  # OpenAI 預設 mp3，pipecat 預設 pcm
+        response_format = body.get("response_format", "mp3")  # OpenAI 預設 mp3，pipecat 預設 pcm
 
         if response_format not in RESPONSE_FORMAT_MEDIA:
             return Response(
