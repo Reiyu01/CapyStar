@@ -228,6 +228,9 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
     # 若後端 provider=vllm，自動將請求轉換為 /v1/chat/completions + input_audio 格式
     @app.post("/v1/audio/transcriptions")
     async def asr_proxy(request: Request):
+        # =========================
+        # 0️⃣ 基本資訊
+        # =========================
         key = extract_key(request)
         user = decode_api_key(key)
         print(f">>> ASR 請求來自: {user.get('student_id')}")
@@ -237,90 +240,101 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
 
         if "multipart/form-data" not in content_type:
             return Response(
-                content='{"error": {"message": "Only multipart/form-data supported"}}',
+                content='{"error": {"message": "Content-Type must be multipart/form-data"}}',
                 status_code=415,
                 media_type="application/json"
             )
 
+        # =========================
+        # 1️⃣ 解析 multipart（⚠️ 只讀一次）
+        # =========================
         form = await request.form()
 
-        model_name = form.get("model", "")
+        model_name = form.get("model", "qwen3-asr-1.7b")
+        language = form.get("language", "zh")
         response_format = form.get("response_format", "json")
 
-        if not model_name:
+        file_field = form.get("file") or form.get("audio")
+
+        if not file_field:
             return Response(
-                content='{"error": {"message": "model is required"}}',
+                content='{"error": {"message": "No file provided"}}',
                 status_code=400,
                 media_type="application/json"
             )
 
+        try:
+            audio_bytes = await file_field.read()
+            filename = getattr(file_field, "filename", "audio.wav")
+            content_type_file = getattr(file_field, "content_type", "audio/wav")
+        except Exception as e:
+            return Response(
+                content=_json.dumps({"error": {"message": str(e)}}),
+                status_code=400,
+                media_type="application/json"
+            )
+
+        # =========================
+        # 2️⃣ Router（你原本的）
+        # =========================
         info = get_model_info(route_table, model_name)
         provider = info.get("provider", "vllm")
 
+        if provider == "vllm":
+            target = info["base_url"] + "/v1/audio/transcriptions"
+        else:
+            target = info["url"]
+
+        print(f">>> ASR 轉發到: {target}")
+
+        # =========================
+        # 3️⃣ 重新組 multipart（🔥 正確做法）
+        # =========================
+        files = {
+            "file": (filename, audio_bytes, content_type_file)
+        }
+
+        data = {
+            "model": model_name,
+            "language": language,
+            "response_format": response_format
+        }
+
+        # =========================
+        # 4️⃣ 發送請求
+        # =========================
         async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                target,
+                files=files,
+                data=data
+            )
 
-            # =========================
-            # ✅ Qwen / vLLM 原生 ASR
-            # =========================
-            if provider == "vllm":
-                target = info["base_url"] + "/v1/audio/transcriptions"
-                print(f">>> 轉發到 Qwen ASR: {target}")
-
-                # 🔥 關鍵：直接轉發 raw body
-                body = await request.body()
-
-                headers = {
-                    "Content-Type": content_type
-                }
-
-                resp = await client.post(
-                    target,
-                    content=body,
-                    headers=headers
-                )
-
-            # =========================
-            # Whisper / 其他
-            # =========================
-            else:
-                target = info["url"]
-                print(f">>> 轉發到 ASR provider: {target}")
-
-                body = await request.body()
-
-                headers = {
-                    "Content-Type": content_type
-                }
-
-                resp = await client.post(
-                    target,
-                    content=body,
-                    headers=headers
-                )
-
-            # =========================
-            # 統一回傳
-            # =========================
-            if resp.status_code != 200:
-                print(">>> 上游錯誤:", resp.text)
-                return Response(
-                    content=resp.content,
-                    status_code=resp.status_code,
-                    media_type="application/json"
-                )
-
-            # 官方 Qwen 已經是 OpenAI 格式
-            if response_format == "text":
-                return Response(
-                    content=resp.text,
-                    media_type="text/plain"
-                )
-
+        # =========================
+        # 5️⃣ 錯誤處理
+        # =========================
+        if resp.status_code != 200:
+            print(">>> 上游錯誤:", resp.text)
             return Response(
                 content=resp.content,
-                status_code=200,
+                status_code=resp.status_code,
                 media_type="application/json"
             )
+
+        # =========================
+        # 6️⃣ 回傳（OpenAI格式）
+        # =========================
+        if response_format == "text":
+            return Response(
+                content=resp.text,
+                media_type="text/plain"
+            )
+
+        return Response(
+            content=resp.content,
+            status_code=200,
+            media_type="application/json"
+        )
 
     #4/28
 
