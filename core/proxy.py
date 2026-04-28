@@ -9,6 +9,66 @@ import os
 import base64
 import re
 import struct
+import json as _json
+import uuid
+
+def _pcm16_to_wav(pcm_bytes: bytes, sample_rate: int = 24000, channels: int = 1) -> bytes:
+    """將原始 PCM16 bytes 包成 WAV 容器（24kHz mono 預設）"""
+    sample_width = 2  # 16-bit
+    data_size = len(pcm_bytes)
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_size, b'WAVE',
+        b'fmt ', 16, 1, channels, sample_rate,
+        sample_rate * channels * sample_width,
+        channels * sample_width,
+        sample_width * 8,
+        b'data', data_size
+    )
+    return header + pcm_bytes
+
+
+class _PCMAudioBuffer:
+    """Pure-bytes PCM16 audio buffer.
+
+    Accumulates raw PCM16 bytes and yields fixed-size segments for
+    transcription. No numpy required — works directly with bytes.
+
+    Parameters
+    ----------
+    sample_rate       : Audio sample rate in Hz (default 24000 to match OpenAI Realtime)
+    segment_duration_s: How many seconds of audio to accumulate before auto-transcribing
+    """
+    def __init__(self, sample_rate: int = 24000, segment_duration_s: float = 5.0):
+        # PCM16 = 2 bytes per sample
+        self._segment_bytes = int(segment_duration_s * sample_rate * 2)
+        self._buf = bytearray()
+
+    def append(self, data: bytes) -> None:
+        self._buf += data
+
+    def read_segment(self) -> bytes | None:
+        """Return one full segment (segment_duration_s) if available, else None."""
+        if len(self._buf) < self._segment_bytes:
+            return None
+        segment = bytes(self._buf[:self._segment_bytes])
+        del self._buf[:self._segment_bytes]
+        return segment
+
+    def flush(self) -> bytes | None:
+        """Return all remaining bytes and clear the buffer."""
+        if not self._buf:
+            return None
+        audio = bytes(self._buf)
+        self._buf.clear()
+        return audio
+
+    def clear(self) -> None:
+        self._buf.clear()
+
+    def __len__(self) -> int:
+        return len(self._buf)
+
 
 #TODO: 目前都是用print輸出log，後續搭配loggingg以及資料庫來做紀錄
 def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
@@ -57,172 +117,196 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         #         resp = await client.post(target,json=body)
         #         return resp.json()
             
-    #Websocket ASR路由邏輯 — 相容 OpenAI realtime 格式
-    # OpenAI 標準: wss://.../v1/realtime?model=<model_name>
-    # 同時保留 path param 格式向下相容
+    # ──────────────────────────────────────────────────────────────
+    # WebSocket: /v1/realtime — 相容 OpenAI Realtime Transcription API
+    # wss://.../v1/realtime?model=<model>
+    # 支援事件: session.update / input_audio_buffer.append / .commit / .clear
+    # 回傳事件: session.created / session.updated / input_audio_buffer.committed
+    #           conversation.item.input_audio_transcription.delta / .completed / error
+    #
+    # 音訊緩衝策略:
+    #   - 每累積 segment_duration_s 秒的 PCM16 音訊 → 自動送出辨識（不需要客戶端 commit）
+    #   - 客戶端顯式 commit → 立即 flush 剩餘音訊並辨識
+    # ──────────────────────────────────────────────────────────────
     @app.websocket("/v1/realtime")
     @app.websocket("/v1/realtime/{model_name}")
-    # async def asr_websocket_proxy(websocket: WebSocket, model_name: str):
-    #     # 1. 身份驗證 (從 Query Params 或 Headers 提取)
-    #     api_key = websocket.query_params.get("api_key") or websocket.headers.get("Authorization")
-    #     if api_key and api_key.startswith("Bearer "):
-    #         api_key = api_key.replace("Bearer ", "")
-
-    #     try:
-    #         # 呼叫 keygen.py 中的 decode_api_key
-    #         user = await decode_api_key(api_key, None) # 根據你之前的 decode_api_key 定義調整
-    #         print(f">>> ASR 請求來自: {user['user_id']}")
-    #     except Exception as e:
-    #         print(f"ASR Auth Failed: {e}")
-    #         await websocket.close(code=4003)
-    #         return
-
-    #     # 2. 定位後端服務 (Qwen3-ASR 跑在 8001 埠)
-    #     raw_target = get_target(route_table, model_name)
-    #     # 假設後端路徑是 /ws/asr
-    #     target_base = raw_target.replace("/v1/chat/completions", "")
-    #     target_ws_url = f"{target_base.replace('http', 'ws', 1).rstrip('/')}/ws/asr"
-
-    #     print(f">>> 轉發 ASR 流量至: {target_ws_url}")
-
-    #     await websocket.accept()
-
-    #     try:
-    #         # 3. 建立與 Qwen3-ASR 後端的連線
-    #         async with websockets.connect(target_ws_url, ping_interval=20) as backend_ws:
-                
-    #             async def forward_to_backend():
-    #                 """ 
-    #                 前端 -> Proxy -> 後端 (Qwen3-ASR)
-    #                 這部分會將前端傳來的二進位音訊或 JSON 指令原封不動丟給後端
-    #                 """
-    #                 async for message in websocket.iter_modules(): # 使用 iter_bytes/text 或通用 receive
-    #                     data = await websocket.receive()
-    #                     if "bytes" in data:
-    #                         # Qwen3-ASR 預期收到 bytes 會進行 ASR 推論
-    #                         await backend_ws.send(data["bytes"])
-    #                     elif "text" in data:
-    #                         # 處理前端傳來的控制指令 (例如: {"type": "control.finish_stream"})
-    #                         await backend_ws.send(data["text"])
-    #                     elif data["type"] == "websocket.disconnect":
-    #                         break
-
-    #             async def forward_to_client():
-    #                 """ 
-    #                 後端 (Qwen3-ASR) -> Proxy -> 前端
-    #                 這裡會收到 Qwen3-ASR 回傳的 {"type": "response.streaming", "text": "..."}
-    #                 """
-    #                 async for message in backend_ws:
-    #                     if isinstance(message, str):
-    #                         # 轉發 Qwen3-ASR 的 JSON 結果給前端
-    #                         await websocket.send_text(message)
-    #                     else:
-    #                         await websocket.send_bytes(message)
-
-    #             # 雙向併發執行
-    #             await asyncio.gather(forward_to_backend(), forward_to_client())
-
-    #     except WebSocketDisconnect:
-    #         print("Client disconnected from ASR Proxy")
-    #     except Exception as e:
-    #         print(f"ASR Proxy Error: {e}")
-    #     finally:
-    #         if websocket.client_state.name != "DISCONNECTED":
-    #             await websocket.close()
-
-
-
-    async def asr_websocket_proxy(websocket: WebSocket, model_name: str = None):
-        # OpenAI 格式: ?model=<name>；舊格式: path param
-        model_name = model_name or websocket.query_params.get("model", "qwen3-asr-1.7b")
-        #連線驗證
-        api_key = websocket.query_params.get("api_key") or websocket.headers.get("Authorization")
-
-        if api_key and api_key.startswith("Bearer "):
-            api_key = api_key.replace("Bearer ", "")
+    async def realtime_transcription(websocket: WebSocket, model_name: str = None):
+        # 1. 身份驗證
+        api_key = websocket.query_params.get("api_key") or websocket.headers.get("Authorization", "")
+        if api_key.startswith("Bearer "):
+            api_key = api_key[7:]
         try:
             user = decode_api_key(api_key)
-            print(f">>> ASR 請求來自: {user['student_id']}")
+            print(f">>> Realtime ASR 請求來自: {user['student_id']}")
         except Exception:
-            # 必須先 accept 再 close，否則 WebSocket 會報錯
             await websocket.accept()
             await websocket.close(code=4003)
             return
 
-        info = get_model_info(route_table, model_name)
-        target_ws_url = info["base_url"].replace("http", "ws", 1)
+        # 2. 模型選擇（優先: path param > query param > 預設）
+        model_name = model_name or websocket.query_params.get("model", "qwen3-asr-1.7b")
 
         await websocket.accept()
-        
+
+        # 3. Session 狀態
+        session_id = uuid.uuid4().hex
+        session_config = {
+            "id": f"sess_{session_id[:8]}",
+            "object": "realtime.session",
+            "type": "transcription",
+            "model": model_name,
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "transcription": {
+                        "model": model_name,
+                        "language": "zh",
+                    },
+                    "turn_detection": None,  # 停用 VAD，由客戶端 commit 或緩衝區自動切段
+                }
+            }
+        }
+
+        # 4. session.created
+        await websocket.send_text(_json.dumps({
+            "event_id": f"event_{uuid.uuid4().hex[:8]}",
+            "type": "session.created",
+            "session": session_config
+        }))
+
+        # 5. 音訊緩衝區（自動每 5 秒切一段）
+        audio_buf  = _PCMAudioBuffer(sample_rate=24000, segment_duration_s=5.0)
+        item_counter = 0
+        prev_item_id: str | None = None
+
+        async def _transcribe(item_id: str, pcm_bytes: bytes, lang: str) -> None:
+            """PCM16 → WAV → POST 後端 → 發送 delta + completed 事件"""
+            nonlocal prev_item_id
+            wav_bytes = _pcm16_to_wav(pcm_bytes)
+            info      = get_model_info(route_table, model_name)
+            provider  = info.get("provider", "vllm")
+            target    = (info["base_url"] + "/v1/audio/transcriptions") if provider == "vllm" else info["url"]
+            print(f">>> Realtime ASR [{item_id}] 轉發: {target} ({len(pcm_bytes)} bytes PCM)")
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(
+                        target,
+                        files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+                        data={"model": model_name, "language": lang, "response_format": "json"}
+                    )
+                if resp.status_code == 200:
+                    transcript = resp.json().get("text", "")
+                    await websocket.send_text(_json.dumps({
+                        "event_id": f"event_{uuid.uuid4().hex[:8]}",
+                        "type": "conversation.item.input_audio_transcription.delta",
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "delta": transcript
+                    }))
+                    await websocket.send_text(_json.dumps({
+                        "event_id": f"event_{uuid.uuid4().hex[:8]}",
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "item_id": item_id,
+                        "content_index": 0,
+                        "transcript": transcript
+                    }))
+                    print(f">>> Realtime ASR [{item_id}] 結果: {transcript}")
+                    prev_item_id = item_id
+                else:
+                    raise RuntimeError(f"Backend {resp.status_code}: {resp.text[:200]}")
+            except Exception as exc:
+                print(f">>> Realtime ASR [{item_id}] 錯誤: {exc}")
+                try:
+                    await websocket.send_text(_json.dumps({
+                        "event_id": f"event_{uuid.uuid4().hex[:8]}",
+                        "type": "error",
+                        "error": {"type": "transcription_error", "message": str(exc), "item_id": item_id}
+                    }))
+                except Exception:
+                    pass
+
+        def _next_item_id() -> str:
+            nonlocal item_counter
+            item_counter += 1
+            return f"item_{item_counter:03d}"
+
+        async def _commit_segment(pcm: bytes) -> None:
+            """發 committed 事件 + 非同步啟動辨識任務"""
+            item_id = _next_item_id()
+            await websocket.send_text(_json.dumps({
+                "event_id": f"event_{uuid.uuid4().hex[:8]}",
+                "type": "input_audio_buffer.committed",
+                "previous_item_id": prev_item_id,
+                "item_id": item_id
+            }))
+            lang = session_config["audio"]["input"]["transcription"].get("language", "zh")
+            asyncio.create_task(_transcribe(item_id, pcm, lang))
+
+        # 6. 事件迴圈
         try:
-            async with websockets.connect(target_ws_url, ping_interval=20) as backend_ws:
+            while True:
+                data = await websocket.receive()
+                if data["type"] == "websocket.disconnect":
+                    break
+                if "text" not in data:
+                    continue
+                try:
+                    event = _json.loads(data["text"])
+                except _json.JSONDecodeError:
+                    continue
 
-                async def forward_to_backend():
-                    """前端(Pipecat) -> 後端(ASR) (音訊/指令)"""
-                    audio_bytes_received = 0  # 🌟 新增：用來計算收到多少位元組的聲音
-                    
-                    while True:
-                        data = await websocket.receive()
-                        if "bytes" in data:
-                            audio_chunk = data["bytes"]
-                            audio_bytes_received += len(audio_chunk)
-                            
-                            # 🌟 新增：每收到約 16KB 的聲音（大約半秒），印出一次提示
-                            if audio_bytes_received > 16000:
-                                print(f"🟢 [ASR Proxy] 收到來自 Pipecat 的聲音封包! 已轉發 {audio_bytes_received} bytes")
-                                audio_bytes_received = 0 # 歸零重新計算
-                                
-                            await backend_ws.send(audio_chunk)
-                        elif "text" in data:
-#                            print(f"📝 [ASR Proxy] 收到文字指令: {data['text']}")
-                            await backend_ws.send(data["text"])
-                        elif data["type"] == "websocket.disconnect":
-                            print("❌ [ASR Proxy] Pipecat 斷開連線")
-                            break
+                etype = event.get("type", "")
 
+                # ── session.update ──────────────────────────────
+                if etype == "session.update":
+                    update = event.get("session", {})
+                    try:
+                        lang_val = update["audio"]["input"]["transcription"]["language"]
+                        session_config["audio"]["input"]["transcription"]["language"] = lang_val
+                    except KeyError:
+                        pass
+                    if "model" in update:
+                        session_config["model"] = model_name = update["model"]
+                        session_config["audio"]["input"]["transcription"]["model"] = model_name
+                    await websocket.send_text(_json.dumps({
+                        "event_id": f"event_{uuid.uuid4().hex[:8]}",
+                        "type": "session.updated",
+                        "session": session_config
+                    }))
 
-                # async def forward_to_backend():
-                #     """前端 ->後端 (音訊/指令) """
-                #     # 修正：使用 receive() 處理所有類型的 Frame
-                #     while True:
-                #         data = await websocket.receive()
-                #         if "bytes" in data:
-                #             await backend_ws.send(data["bytes"])
-                #         elif "text" in data:
-                #             await backend_ws.send(data["text"])
-                #         elif data["type"] == "websocket.disconnect":
-                #             break
+                # ── input_audio_buffer.append ────────────────────
+                elif etype == "input_audio_buffer.append":
+                    b64 = event.get("audio", "")
+                    if b64:
+                        audio_buf.append(base64.b64decode(b64))
+                        # 自動切段：每滿 5 秒就觸發一次辨識
+                        while True:
+                            seg = audio_buf.read_segment()
+                            if seg is None:
+                                break
+                            await _commit_segment(seg)
 
-                async def forward_to_client():
-                    """後端 ->前端 (辨識結果) """
+                # ── input_audio_buffer.commit ────────────────────
+                elif etype == "input_audio_buffer.commit":
+                    remaining = audio_buf.flush()
+                    if remaining:
+                        await _commit_segment(remaining)
 
-                    async for message in backend_ws:
-                        #判斷類型
-
-                        if isinstance(message, str):
-                            await websocket.send_text(message)
-                        else:
-                            await websocket.send_bytes(message)
-
-                #任一結束就全部停止
-                done, pending = await asyncio.wait(
-                    [
-                        asyncio.create_task(forward_to_backend()),
-                        asyncio.create_task(forward_to_client()),
-                    ],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in pending:
-                    task.cancel()
+                # ── input_audio_buffer.clear ─────────────────────
+                elif etype == "input_audio_buffer.clear":
+                    audio_buf.clear()
+                    await websocket.send_text(_json.dumps({
+                        "event_id": f"event_{uuid.uuid4().hex[:8]}",
+                        "type": "input_audio_buffer.cleared"
+                    }))
 
         except WebSocketDisconnect:
-            pass 
+            pass
         except Exception as e:
-            print(f"ASR Proxy Error: {e}")
+            print(f"Realtime Proxy Error: {e}")
         finally:
             if websocket.client_state.name != "DISCONNECTED":
                 await websocket.close()
-
 
     # POST ASR — 同時支援 application/json 及 multipart/form-data
     # 若後端 provider=vllm，自動將請求轉換為 /v1/chat/completions + input_audio 格式
