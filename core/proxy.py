@@ -305,8 +305,11 @@ def register_proxy_routes(app: FastAPI, route_table: dict, config:dict):
         except Exception as e:
             print(f"Realtime Proxy Error: {e}")
         finally:
-            if websocket.client_state.name != "DISCONNECTED":
-                await websocket.close()
+            try:
+                if websocket.client_state.name != "DISCONNECTED":
+                    await websocket.close()
+            except Exception:
+                pass
 
     # POST ASR — 同時支援 application/json 及 multipart/form-data
     # 若後端 provider=vllm，自動將請求轉換為 /v1/chat/completions + input_audio 格式

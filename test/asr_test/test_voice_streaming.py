@@ -75,17 +75,29 @@ async def debug_transcribe():
         print("⏳ 音訊傳送完畢，送出 commit...")
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
 
-        # 5. 接收所有事件，直到 completed
-        full_transcript = ""
-        print("\n📡 等待辨識結果...")
+        # 5. 接收所有事件，收集所有 completed 直到連線關閉或逾時
+        # 音訊會被切成多段（每 5 秒一段），每段各有獨立的 completed 事件
+        transcripts: list[str] = []   # 依 item_id 收集
+        last_event_time = asyncio.get_event_loop().time()
+        IDLE_TIMEOUT = 10.0  # 超過 10 秒沒有新事件視為結束
+
+        print(f"\n📡 等待辨識結果（閒置 {IDLE_TIMEOUT}s 後結束）...")
 
         while True:
+            remaining = IDLE_TIMEOUT - (asyncio.get_event_loop().time() - last_event_time)
+            if remaining <= 0:
+                print("\n⏹️  閒置逾時，結束接收")
+                break
             try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
             except asyncio.TimeoutError:
-                print("\n⚠️  等待逾時（30s），結束接收")
+                print("\n⏹️  閒置逾時，結束接收")
+                break
+            except Exception as e:
+                print(f"\n🔌 連線關閉: {e}")
                 break
 
+            last_event_time = asyncio.get_event_loop().time()
             data = json.loads(raw)
             etype = data.get("type", "")
 
@@ -93,21 +105,24 @@ async def debug_transcribe():
                 print(f"   [committed] item_id={data.get('item_id')}")
 
             elif etype == "conversation.item.input_audio_transcription.delta":
-                delta = data.get("delta", "")
-                full_transcript += delta
-                print(f"\r   [delta] {full_transcript}", end="", flush=True)
+                # delta 是即時串流片段，可選擇性印出
+                pass
 
             elif etype == "conversation.item.input_audio_transcription.completed":
-                full_transcript = data.get("transcript", full_transcript)
-                print(f"\n✅ 辨識完成: {full_transcript}")
-                break
+                text = data.get("transcript", "")
+                item_id = data.get("item_id", f"item_{len(transcripts)+1:03d}")
+                transcripts.append(text)
+                print(f"   [{item_id}] {text}")
 
             elif etype == "error":
                 print(f"\n❌ 錯誤: {data.get('error')}")
-                break
 
             else:
-                print(f"   [其他事件] {etype}")
+                pass  # session.updated 等忽略
+
+        full_transcript = " ".join(t for t in transcripts if t)
+        print(f"\n✅ 全部辨識完成 ({len(transcripts)} 段)")
+        print(f"📝 完整文字:\n{full_transcript}")
 
         # 6. 儲存結果
         if full_transcript:
